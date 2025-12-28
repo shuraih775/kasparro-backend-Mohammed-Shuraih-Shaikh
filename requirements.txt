@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+requests
+python-dotenv
+prometheus-client
+pytest
+alembic
+prometheus-client
+pytest
+pytest-mock
+httpx

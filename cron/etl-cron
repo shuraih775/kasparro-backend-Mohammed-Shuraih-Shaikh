@@ -1,0 +1,6 @@
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+PYTHONPATH=/app
+
+0 */4 * * * /usr/local/bin/python -m app.services.etl_service >> /var/log/etl.log 2>&1
+
