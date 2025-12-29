@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from datetime import datetime,timezone
 
 metadata = MetaData()
 
@@ -42,18 +43,32 @@ raw_csv = create_raw_table("raw_csv")
 assets = Table(
     "assets",
     metadata,
-    Column("asset_id", Text, primary_key=True),
+    Column("asset_id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column("symbol", Text, nullable=False),
     Column("name", Text, nullable=False),
     UniqueConstraint("symbol", "name", name="uq_asset_symbol_name")
 
 )
 
+asset_sources = Table(
+    "asset_sources",
+    metadata,
+    Column("asset_id", UUID(as_uuid=True), ForeignKey("assets.asset_id", ondelete="CASCADE"),nullable=False),
+    Column("source", Text, nullable=False),
+    Column("source_asset_id", Text, nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    UniqueConstraint(
+        "source",
+        "source_asset_id",
+        name="uq_asset_sources_source_identity",
+    ),
+)
+
 asset_market_data = Table(
     "asset_market_data",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
-    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
+    Column("asset_id", UUID(as_uuid=True), ForeignKey("assets.asset_id", ondelete="CASCADE"), nullable=False),
     Column("source", Text, nullable=False),
     Column("price_usd", NUMERIC),
     Column("market_cap_usd", NUMERIC),
@@ -129,3 +144,4 @@ transform_failures = Table(
     Column("error_message", Text, nullable=False),
     Column("payload", JSON),
 )
+

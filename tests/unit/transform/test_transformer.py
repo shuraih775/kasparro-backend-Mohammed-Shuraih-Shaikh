@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, select, func
 from app.schemas.tables import metadata, assets, asset_market_data
 from app.transform.transformer import transform_coingecko
+import uuid
 
 def test_transform_coingecko_creates_asset_and_market_data():
     engine = create_engine("sqlite:///:memory:")
@@ -18,9 +19,9 @@ def test_transform_coingecko_creates_asset_and_market_data():
             "last_updated": "2024-01-01T00:00:00Z",
         }
     }
-
+    run_id = uuid.uuid4()
     with engine.begin() as conn:
-        transform_coingecko(conn, row)
+        transform_coingecko(conn, row = row,run_id=run_id)
 
     with engine.connect() as conn:
         asset = conn.execute(select(assets)).fetchone()
@@ -44,10 +45,11 @@ def test_transform_coingecko_idempotent():
             "last_updated": "2024-01-01T00:00:00Z",
         }
     }
+    run_id = uuid.uuid4()
 
     with engine.begin() as conn:
-        transform_coingecko(conn, row)
-        transform_coingecko(conn, row)
+        transform_coingecko(conn, row = row,run_id=run_id)
+        transform_coingecko(conn, row = row,run_id=run_id)
 
     with engine.connect() as conn:
         asset_count = conn.execute(select(func.count()).select_from(assets)).scalar()

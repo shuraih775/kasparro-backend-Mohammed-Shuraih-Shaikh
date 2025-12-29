@@ -1,6 +1,7 @@
 from app.core.logging import setup_logging
 import logging
 import time
+import uuid
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -23,15 +24,12 @@ from app.transform.transformer import (
     transform_csv,
 )
 
-from app.core.metrics import (
-    transform_records_total,
-    transform_run_duration
-)
-
 
 # ---------------- INGEST ----------------
 
 def run_ingest(engine):
+    logger.info("[INGEST] Starting ingestion")
+
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
             pool.submit(ingest_coinpaprika, engine): "coinpaprika",
@@ -40,7 +38,15 @@ def run_ingest(engine):
         }
 
         for future, source in futures.items():
-            records = future.result()  
+            try:
+                records = future.result()
+                logger.info("[INGEST] %s ingested %d records", source, records)
+            except Exception:
+                logger.exception("[INGEST] %s ingestion failed", source)
+                raise
+
+    logger.info("[INGEST] All ingestion completed")
+
 
             
 
@@ -60,13 +66,9 @@ def run_etl(engine):
     coingecko_since = None
     csv_since = None
 
-    if cp_coinpaprika:
-        coinpaprika_since = cp_coinpaprika["last_processed_at"]
-    
-    if cp_coingecko:
-        coingecko_since = cp_coingecko["last_processed_at"]
-    if csv_since:
-        csv_since = cp_csv["last_processed_at"]
+    coinpaprika_since = cp_coinpaprika["last_processed_at"] if cp_coinpaprika else None
+    coingecko_since = cp_coingecko["last_processed_at"] if cp_coingecko else None
+    csv_since = cp_csv["last_processed_at"] if cp_csv else None
 
 
     transform_stats = {
@@ -79,50 +81,50 @@ def run_etl(engine):
     start_ts = time.time()
 
     try:
+        logger.info('[ETL] Run Started')
+
         # -------- INGEST (BRONZE) --------
         run_ingest(engine)
 
+        logger.info('[ETL] Transformation Started')
         # -------- TRANSFORM (SILVER) --------
+        run_id = uuid.uuid4()
+
         with engine.begin() as conn:
             for row in load_raw_coinpaprika(conn,coinpaprika_since):
-                ok = transform_coinpaprika(conn, row)
+                ok = transform_coinpaprika(conn, row=row, run_id=run_id)
                 if ok:
                     transform_stats["coinpaprika"]["success"] += 1
                 else:
                     transform_stats["coinpaprika"]["failed"] += 1
 
             for row in load_raw_coingecko(conn,coingecko_since):
-                ok = transform_coingecko(conn, row)
+                ok = transform_coingecko(conn, row=row, run_id=run_id)
                 if ok:
                     transform_stats["coingecko"]["success"] += 1
                 else:
                     transform_stats["coingecko"]["failed"] += 1
 
             for row in load_raw_csv(conn,csv_since):
-                ok = transform_csv(conn, row)
+                ok = transform_csv(conn, row=row, run_id=run_id)
                 if ok:
                     transform_stats["csv"]["success"] += 1
                 else:
                     transform_stats["csv"]["failed"] += 1
 
 
-       
+        logger.info('[ETL] Transformation Completed')
         logger.info("[ETL] Completed successfully")
 
-    finally:
-        # -------- METRICS (DURATION) --------
-        for source, stats in transform_stats.items():
-            transform_records_total.labels(source, "success").inc(stats["success"])
-            transform_records_total.labels(source, "failed").inc(stats["failed"])
-
-        transform_run_duration.observe(time.time() - start_ts)
-
-
+    except Exception:
+        logger.exception("[ETL] Run failed")
+        raise
+  
 # ---------------- ENTRYPOINT ----------------
 
 if __name__ == "__main__":
-    from app.core.db import engine
+    from app.core.db import get_engine
     from app.core.db_waiter import wait_for_db
-
+    engine = get_engine()
     wait_for_db(engine)
     run_etl(engine)

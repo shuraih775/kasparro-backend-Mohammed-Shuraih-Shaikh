@@ -15,6 +15,7 @@ from app.schemas.tables import (
     assets,
     asset_market_data,
 )
+import uuid
 
 
 @pytest.fixture
@@ -116,13 +117,14 @@ def test_stats_aggregates_runs(client, engine):
 
 # ---------- /data ----------
 def test_get_data_basic(client, engine):
+    asset_id = uuid.uuid4()
     ts = datetime.now(timezone.utc)
 
     with engine.begin() as conn:
         conn.execute(
             assets.insert(),
             {
-                "asset_id": "btc",
+                "asset_id": asset_id,
                 "symbol": "BTC",
                 "name": "Bitcoin",
             },
@@ -130,7 +132,7 @@ def test_get_data_basic(client, engine):
         conn.execute(
             asset_market_data.insert(),
             {
-                "asset_id": "btc",
+                "asset_id": asset_id,
                 "source": "coingecko",
                 "price_usd": 100,
                 "market_cap_usd": 1000,
@@ -144,39 +146,106 @@ def test_get_data_basic(client, engine):
     body = res.json()
 
     assert body["pagination"]["count"] == 1
-    assert body["data"][0]["symbol"] == "BTC"
+
+    row = body["data"][0]
+    assert row["symbol"] == "BTC"
+    assert row["source"] == "coingecko"
+    assert float(row["price_usd"]) == 100
 
 
-def test_get_data_filtered_by_source(client, engine):
+def test_get_data_returns_latest_per_asset_per_source(client, engine):
+    asset_id = uuid.uuid4()
+    t1 = datetime.now(timezone.utc) - timedelta(minutes=5)
+    t2 = datetime.now(timezone.utc)
+
+    with engine.begin() as conn:
+        conn.execute(
+            assets.insert(),
+            {
+                "asset_id": asset_id,
+                "symbol": "BTC",
+                "name": "Bitcoin",
+            },
+        )
+        conn.execute(
+            asset_market_data.insert(),
+            [
+                {
+                    "asset_id": asset_id,
+                    "source": "coingecko",
+                    "price_usd": 90,
+                    "market_cap_usd": 900,
+                    "volume_24h_usd": 9,
+                    "last_updated": t1,
+                    "created_at": t1,
+                },
+                {
+                    "asset_id": asset_id,
+                    "source": "coingecko",
+                    "price_usd": 100,
+                    "market_cap_usd": 1000,
+                    "volume_24h_usd": 10,
+                    "last_updated": t2,
+                    "created_at": t2,
+                },
+            ],
+        )
+
+    res = client.get("/data")
+    body = res.json()
+
+    assert body["pagination"]["count"] == 1
+    assert float(body["data"][0]["price_usd"]) == 100
+
+
+
+def test_get_data_multiple_sources(client, engine):
+    asset_id = uuid.uuid4()
     ts = datetime.now(timezone.utc)
 
     with engine.begin() as conn:
         conn.execute(
             assets.insert(),
             {
-                "asset_id": "eth",
-                "symbol": "ETH",
-                "name": "Ethereum",
+                "asset_id": asset_id,
+                "symbol": "BTC",
+                "name": "Bitcoin",
             },
         )
         conn.execute(
             asset_market_data.insert(),
-            {
-                "asset_id": "eth",
-                "source": "coinpaprika",
-                "price_usd": 200,
-                "market_cap_usd": 2000,
-                "volume_24h_usd": 20,
-                "last_updated": ts,
-                "created_at": ts,
-            },
+            [
+                {
+                    "asset_id": asset_id,
+                    "source": "coingecko",
+                    "price_usd": 100,
+                    "market_cap_usd": 1000,
+                    "volume_24h_usd": 10,
+                    "last_updated": ts,
+                    "created_at": ts,
+                },
+                {
+                    "asset_id": asset_id,
+                    "source": "coinpaprika",
+                    "price_usd": 101,
+                    "market_cap_usd": 1010,
+                    "volume_24h_usd": 11,
+                    "last_updated": ts,
+                    "created_at": ts,
+                },
+            ],
         )
 
-    res = client.get("/data?source=coinpaprika")
-    assert len(res.json()["data"]) == 1
+    res = client.get("/data")
+    body = res.json()
+
+    assert body["pagination"]["count"] == 2
+    sources = {row["source"] for row in body["data"]}
+    assert sources == {"coingecko", "coinpaprika"}
 
 
-# ---------- /list-runs ----------
+
+# ---------- /runs ----------
 def test_list_runs_ordered(client, engine):
     now = datetime.now(timezone.utc)
 
@@ -205,7 +274,7 @@ def test_list_runs_ordered(client, engine):
             ],
         )
 
-    res = client.get("/list-runs?limit=1")
+    res = client.get("/runs?limit=1")
     body = res.json()
 
     assert "runs" in body

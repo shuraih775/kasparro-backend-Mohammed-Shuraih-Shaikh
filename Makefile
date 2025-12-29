@@ -12,8 +12,8 @@ down:
 
 test:
 	docker-compose up -d db 
-	docker-compose run --rm --build test
-	docker-compose down -v
+	docker-compose run --rm --build tests
+	docker-compose down -v db
 
 
 migrate-new:

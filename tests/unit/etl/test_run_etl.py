@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call,ANY
 
 from app.services.etl_service import run_etl
 
@@ -68,9 +68,9 @@ def test_run_etl_happy_path(mocker):
     ingest_cg.assert_called_once_with(engine)
     ingest_csv.assert_called_once_with(engine)
 
-    tx_cp.assert_has_calls([call(conn, r) for r in cp_rows])
-    tx_cg.assert_has_calls([call(conn, r) for r in cg_rows])
-    tx_csv.assert_has_calls([call(conn, r) for r in csv_rows])
+    tx_cp.assert_has_calls([call(conn, row=r, run_id=ANY) for r in cp_rows])
+    tx_cg.assert_has_calls([call(conn, row=r, run_id=ANY) for r in cg_rows])
+    tx_csv.assert_has_calls([call(conn, row=r, run_id=ANY) for r in csv_rows])
 
 
 def test_run_etl_fails_on_ingest_error(mocker):

@@ -12,10 +12,29 @@ from sqlalchemy import text, select, func, and_
 from app.core.db import get_engine
 from app.schemas.tables import etl_checkpoints, etl_runs, assets, asset_market_data
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from decimal import Decimal
 
+
+SOURCE_EXPECTATIONS = {
+    "coingecko_markets": {
+        "expects_records": True,
+    },
+    "coinpaprika_tickers": {
+        "expects_records": True,
+    },
+    "csv_market_data": {
+        "expects_records": False,  # static source
+    },
+}
 
 router = APIRouter()
 
+@router.get("/")
+def hello():
+    return {
+        "status": "success",
+        "message": "Welcome to Kasparro ETL pipeline API"
+    }
 
 @router.get("/health")
 def health(engine = Depends(get_engine)):
@@ -121,14 +140,11 @@ def stats(engine = Depends(get_engine)):
 
 
 
-
-
 @router.get("/data")
 def get_data(
     engine = Depends(get_engine),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    asset_id: Optional[str] = None,
     symbol: Optional[str] = None,
     source: Optional[str] = None,
     from_ts: Optional[str] = None,
@@ -139,12 +155,6 @@ def get_data(
 
     filters = []
 
-    if asset_id:
-        filters.append(assets.c.asset_id == asset_id)
-
-    if symbol:
-        filters.append(assets.c.symbol == symbol)
-
     if source:
         filters.append(asset_market_data.c.source == source)
 
@@ -154,9 +164,25 @@ def get_data(
     if to_ts:
         filters.append(asset_market_data.c.last_updated <= to_ts)
 
+    latest_subq = (
+        select(
+            asset_market_data.c.asset_id,
+            asset_market_data.c.source,
+            func.max(asset_market_data.c.last_updated).label("last_updated"),
+        )
+        .group_by(
+            asset_market_data.c.asset_id,
+            asset_market_data.c.source,
+        )
+    )
+
+    if filters:
+        latest_subq = latest_subq.where(and_(*filters))
+
+    latest_subq = latest_subq.subquery("latest")
+
     stmt = (
         select(
-            assets.c.asset_id,
             assets.c.symbol,
             assets.c.name,
             asset_market_data.c.source,
@@ -166,36 +192,31 @@ def get_data(
             asset_market_data.c.last_updated,
         )
         .select_from(
-            asset_market_data.join(
+            asset_market_data
+            .join(
+                latest_subq,
+                and_(
+                    asset_market_data.c.asset_id == latest_subq.c.asset_id,
+                    asset_market_data.c.source == latest_subq.c.source,
+                    asset_market_data.c.last_updated == latest_subq.c.last_updated,
+                ),
+            )
+            .join(
                 assets,
-                asset_market_data.c.asset_id == assets.c.asset_id,
-            )
-        )
-        .where(and_(*filters)) if filters else (
-            select(
-                assets.c.asset_id,
-                assets.c.symbol,
-                assets.c.name,
-                asset_market_data.c.source,
-                asset_market_data.c.price_usd,
-                asset_market_data.c.market_cap_usd,
-                asset_market_data.c.volume_24h_usd,
-                asset_market_data.c.last_updated,
-            )
-            .select_from(
-                asset_market_data.join(
-                    assets,
-                    asset_market_data.c.asset_id == assets.c.asset_id,
-                )
+                assets.c.asset_id == asset_market_data.c.asset_id,
             )
         )
     )
+
+    if symbol:
+        stmt = stmt.where(assets.c.symbol == symbol)
 
     stmt = (
         stmt
         .order_by(
             asset_market_data.c.last_updated.desc(),
-            asset_market_data.c.id.asc(),
+            assets.c.symbol.asc(),
+            asset_market_data.c.source.asc(),
         )
         .limit(limit)
         .offset(offset)
@@ -203,8 +224,6 @@ def get_data(
 
     with engine.connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-
-    latency_ms = int((time.time() - start) * 1000)
 
     return {
         "data": list(rows),
@@ -214,10 +233,11 @@ def get_data(
             "count": len(rows),
         },
         "request_id": request_id,
-        "api_latency_ms": latency_ms,
+        "api_latency_ms": int((time.time() - start) * 1000),
     }
 
-@router.get("/list-runs")
+
+@router.get("/runs")
 def list_runs(
     limit: int = Query(10, ge=1, le=100),
     engine=Depends(get_engine),
@@ -247,6 +267,7 @@ def list_runs(
     }
 
 
+
 @router.get("/compare-runs")
 def compare_runs(engine=Depends(get_engine)):
     start = time.time()
@@ -259,6 +280,11 @@ def compare_runs(engine=Depends(get_engine)):
         ).scalars().all()
 
         for source in sources:
+            expectations = SOURCE_EXPECTATIONS.get(
+                source,
+                {"expects_records": True},
+            )
+
             recent_run = conn.execute(
                 select(etl_runs)
                 .where(etl_runs.c.source == source)
@@ -278,14 +304,13 @@ def compare_runs(engine=Depends(get_engine)):
                     etl_runs.c.source == source,
                     etl_runs.c.status == "success",
                 )
-                .limit(10)
             ).mappings().first()
 
-            if not baseline or not baseline["avg_duration"]:
+            if not baseline:
                 continue
 
-            avg_duration = baseline["avg_duration"]
-            avg_records = baseline["avg_records"] or 0
+            avg_duration = float(baseline["avg_duration"])
+            avg_records = float(baseline["avg_records"] or 0)
 
             if recent_run["status"] == "failed":
                 anomalies.append(
@@ -298,7 +323,8 @@ def compare_runs(engine=Depends(get_engine)):
                 )
 
             if (
-                recent_run["duration_ms"]
+                avg_duration is not None
+                and recent_run["duration_ms"] is not None
                 and recent_run["duration_ms"] > 2 * avg_duration
             ):
                 anomalies.append(
@@ -313,9 +339,12 @@ def compare_runs(engine=Depends(get_engine)):
                 )
 
             if (
-                avg_records > 0
+                expectations["expects_records"]
+                and avg_records is not None
+                and avg_records > 0
                 and recent_run["records_processed"] is not None
-                and recent_run["records_processed"] < 0.5 * avg_records
+                and float(recent_run["records_processed"]) < (0.5 * avg_records)
+
             ):
                 anomalies.append(
                     {
@@ -333,7 +362,8 @@ def compare_runs(engine=Depends(get_engine)):
         "request_id": request_id,
         "api_latency_ms": int((time.time() - start) * 1000),
     }
-    
+
+#to be implemented
 @router.get("/metrics")
 def metrics():
     return Response(

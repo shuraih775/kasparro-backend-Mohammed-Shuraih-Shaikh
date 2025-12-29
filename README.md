@@ -19,7 +19,7 @@ Ingestion (Bronze / raw_* tables)
    ↓
 Transformation (Silver / normalized tables)
    ↓
-API + Metrics + Operational Visibility
+API + Operational Visibility
 ```
 
 ### Core Design Principles
@@ -28,7 +28,7 @@ API + Metrics + Operational Visibility
 * Derived data is **disposable and recomputable**
 * State advances **only on success**
 * Failures must **never corrupt progress**
-* Observability is **mandatory**
+* Every failure is **observable and debuggable**
 
 ---
 
@@ -69,29 +69,51 @@ Common fields:
 
 ---
 
-### Normalized Tables (Silver)
+## Normalized Tables (Silver)
 
-#### `assets`
+### `assets`
 
 Canonical asset identity table.
 
-| Field      | Description        |
-| ---------- | ------------------ |
-| `asset_id` | Primary identifier |
-| `symbol`   | Asset symbol       |
-| `name`     | Asset name         |
+| Field      | Description       |
+| ---------- | ----------------- |
+| `asset_id` | UUID primary key  |
+| `symbol`   | Normalized symbol |
+| `name`     | Canonical name    |
+
+**Purpose**
+
+Defines a **single canonical identity** for each asset, independent of data source.
+
+---
+
+### `asset_sources`
+
+Maps **source-specific identifiers** to canonical assets.
+
+| Field             | Description              |
+| ----------------- | ------------------------ |
+| `asset_id`        | FK → assets.asset_id     |
+| `source`          | Data source name         |
+| `source_asset_id` | Source-native identifier |
+| `created_at`      | Mapping creation time    |
 
 **Constraint**
 
 ```
-(symbol, name) UNIQUE
+(source, source_asset_id) UNIQUE
 ```
 
-Ensures a single canonical identity per asset.
+**Rationale**
+
+* Same asset appears under different IDs across sources
+* Decouples source identity from canonical identity
+* Prevents symbol-based collisions
+* Enables consistent joins across heterogeneous feeds
 
 ---
 
-#### `asset_market_data`
+### `asset_market_data`
 
 Time-series market data derived from raw sources.
 
@@ -99,7 +121,7 @@ Time-series market data derived from raw sources.
 | ---------------- | ---------------- |
 | `asset_id`       | FK → assets      |
 | `source`         | Data source      |
-| `price_usd`      | Current price    |
+| `price_usd`      | Price in USD     |
 | `market_cap_usd` | Market cap       |
 | `volume_24h_usd` | 24h volume       |
 | `last_updated`   | Source timestamp |
@@ -114,8 +136,9 @@ Time-series market data derived from raw sources.
 **Rationale**
 
 * Deterministic derivation
-* Safe to recompute
-* Prevents duplicate inserts on re-run
+* Idempotent transforms
+* Safe re-runs without duplication
+* Represents historical time-series data
 
 ---
 
@@ -125,21 +148,21 @@ Time-series market data derived from raw sources.
 
 Tracks **last known good progress per ingestion source**.
 
-| Field                 | Purpose                    |
-| --------------------- | -------------------------- |
-| `source`              | Ingestion source           |
-| `last_processed_at`   | Progress marker            |
-| `last_success_run_id` | Successful run             |
-| `last_failure_at`     | Failure timestamp          |
-| `last_failure_error`  | Error details              |
-| `status`              | running / success / failed |
-| `updated_at`          | Last update                |
+| Field                 | Purpose             |
+| --------------------- | ------------------- |
+| `source`              | Ingestion source    |
+| `last_processed_at`   | Progress marker     |
+| `last_success_run_id` | Last successful run |
+| `last_failure_at`     | Failure timestamp   |
+| `last_failure_error`  | Error message       |
+| `status`              | success / failed    |
+| `updated_at`          | Last update         |
 
 **Guarantees**
 
 * Progress advances **only on success**
 * Safe resume after crash or restart
-* Operational visibility per source
+* One checkpoint per ingestion source
 
 ---
 
@@ -147,17 +170,16 @@ Tracks **last known good progress per ingestion source**.
 
 Tracks **individual ingestion executions**.
 
-| Field                   | Purpose                    |
-| ----------------------- | -------------------------- |
-| `run_id`                | Execution ID               |
-| `source`                | Ingestion source           |
-| `started_at / ended_at` | Timing                     |
-| `duration_ms`           | Runtime                    |
-| `status`                | running / success / failed |
-| `records_processed`     | Throughput                 |
-| `error_message`         | Failure info               |
-| `metadata`              | Optional context           |
-| `triggered_by`          | manual / cron / retry      |
+| Field                   | Purpose               |
+| ----------------------- | --------------------- |
+| `run_id`                | Execution ID          |
+| `source`                | Ingestion source      |
+| `started_at / ended_at` | Timing                |
+| `duration_ms`           | Runtime               |
+| `status`                | success / failed      |
+| `records_processed`     | Rows ingested         |
+| `error_message`         | Failure details       |
+| `triggered_by`          | manual / cron / retry |
 
 **Important Design Choice**
 
@@ -171,66 +193,49 @@ Tracks **individual ingestion executions**.
 
 Captures **row-level transformation errors**.
 
-| Field           | Purpose                |
-| --------------- | ---------------------- |
-| `source`        | Data source            |
-| `raw_table`     | Origin table           |
-| `raw_id`        | Raw row ID             |
-| `run_id`        | Optional ingestion run |
-| `failed_at`     | Timestamp              |
-| `error_type`    | Error category         |
-| `error_message` | Details                |
-| `payload`       | Offending payload      |
+| Field           | Purpose           |
+| --------------- | ----------------- |
+| `source`        | Data source       |
+| `raw_table`     | Origin table      |
+| `raw_id`        | Raw row ID        |
+| `run_id`        | Ingestion run     |
+| `failed_at`     | Timestamp         |
+| `error_type`    | Error category    |
+| `error_message` | Details           |
+| `payload`       | Offending payload |
 
 **Rationale**
 
-* Prevents bad rows from blocking the pipeline
-* Enables targeted debugging
-* Keeps transforms fail-safe
+* Bad rows never block the pipeline
+* Full auditability
+* Transforms remain fail-safe
 
 ---
 
 ## Data Validation (Pre-Transform)
 
-Before any transformation, raw payloads are validated using **Pydantic**.
+All Silver data is validated **before insertion** using Pydantic.
 
 ```python
-from pydantic import BaseModel, ConfigDict, Field
-from datetime import datetime
-from decimal import Decimal
-
 class AssetMarketData(BaseModel):
     asset_id: str
     source: str
-
-    price_usd: Decimal = Field(gt=0)
-    market_cap_usd: Decimal | None = Field(default=None, ge=0)
-    volume_24h_usd: Decimal | None = Field(default=None, ge=0)
-
+    price_usd: Decimal
+    market_cap_usd: Decimal | None
+    volume_24h_usd: Decimal | None
     last_updated: datetime
     created_at: datetime
-
-    model_config = ConfigDict(extra="forbid")
 ```
 
-### Why validation happens **before** transform
+**Key rule**
 
-* Raw ingestion **never rejects data**
-* All payloads are preserved exactly as received
-* Validation happens only when deriving Silver data
-* Invalid rows are:
+> Raw ingestion never rejects data.
+> Validation happens only when deriving normalized tables.
 
-  * Logged
-  * Recorded in `transform_failures`
-  * Skipped safely
-
-This ensures:
-
-* No data loss
-* Full auditability
-* Strong correctness guarantees in normalized tables
+Invalid rows are recorded in `transform_failures` and skipped.
 
 ---
+
 
 ## Ingestion Layer (Bronze)
 
@@ -305,20 +310,6 @@ No corruption. No manual intervention.
 
 ## Observability
 
-### Metrics (`/metrics`)
-
-Prometheus-compatible metrics include:
-
-* Ingestion runs by source and status
-* Records processed
-* Transform successes and failures
-* Run durations
-* Last successful ingestion timestamps
-
-Metrics are emitted **after commit**, never optimistically.
-
----
-
 ### APIs
 
 * `/health` — DB connectivity + ingestion state
@@ -363,26 +354,34 @@ There are **no long-running ETL services** and no cron processes inside producti
 ---
 
 
-
 ## Deployment Architecture
 
 ### Database
 
 * **Amazon RDS (PostgreSQL)**
 
+### Traffic
+
+* **Application Load Balancer (ALB)**
+
+  * Public entry point for the API
+  * Routes requests to the ECS API service
+  * Performs health checks and load balancing
+
 ### Compute
 
-* **ECS Service** → API
+* **ECS Service (behind ALB)** → API
 * **ECS Scheduled Task (EventBridge)** → ETL
 
 ### Containers
 
 * API runs as a long-lived ECS service
-* ETL runs as a **one-shot task**, triggered on schedule, exits on completion
-
-No cron runs in production containers.
+* ETL runs as a one-shot task on schedule
+* No cron runs in production containers
 
 ---
+
+
 
 ## Docker Strategy
 
@@ -478,6 +477,43 @@ In this setup:
 
 ---
 
+### `docker-compose.dev.yml` (Schema & Migration Only)
+
+Kasparro includes a separate **`docker-compose.dev.yml`** file intended **only for development-time database schema work**.
+
+Purpose:
+
+* Mounts the API container against the **project root directory**
+* Allows live access to:
+
+  * Alembic migration files
+  * SQLAlchemy models
+  * Local source changes
+* Makes it easier to:
+
+  * Create new migrations
+  * Autogenerate and verify schema changes
+  * Inspect and adjust migrations before committing
+
+**Important Constraints**
+
+* This compose file is **not** used for normal development runs
+* It is **not** used for ETL execution
+* It is **not** used in production
+
+**When to use it**
+
+Use `docker-compose.dev.yml` **only when**:
+
+* Adding new tables or columns
+* Modifying existing schemas
+* Generating or fixing Alembic migrations
+
+Once migrations are finalized, normal development and testing should use the standard compose setup.
+
+
+---
+
 ## Testing
 
 Tests focus on:
@@ -493,8 +529,42 @@ Run locally with:
 ```bash
 make test
 ```
+---
+
+
+## Source-Specific Data Limits
+
+### CoinPaprika Ingestion Scope
+
+CoinPaprika exposes **~57,000 assets**, but enforces a strict monthly request limit.
+
+**Constraints**
+
+* Monthly request quota: **~20,000 requests**
+* Full ingestion of all assets is not feasible under this limit
+
+**Design Choice**
+
+* Ingest only the **top 200 assets by market relevance**
+* Run ingestion **once every 12 hours**
+
+This results in:
+
+* ~400 assets/day
+* ~12,000 requests/month
+* Safely within CoinPaprika rate limits
+
+**Rationale**
+
+* Covers assets that matter operationally
+* Avoids quota exhaustion
+* Keeps ingestion predictable and stable
+* Prevents partial or inconsistent datasets caused by mid-run throttling
+
+This limit is intentional and can be increased or made configurable if quotas change.
 
 ---
+
 
 ## Known Trade-offs
 
@@ -520,8 +590,11 @@ The following enhancements are **explicitly planned but not yet implemented**:
 
 * Automated schema drift detection on raw payloads
 * Parallelized transformation execution for higher throughput
-* Improved transformation resume semantics
-  (current behavior derives progress based on `last_transformed_at`)
+* Explicit transformation checkpointing
+
+  - Per-source / per-table transform checkpoints
+  - Tracks last successfully transformed raw row explicitly
+  - Replaces current implicit behavior based on last_transformed_at and uniqueness constraints
 
 These are deferred to avoid premature complexity and will be introduced only when operational scale demands them.
 

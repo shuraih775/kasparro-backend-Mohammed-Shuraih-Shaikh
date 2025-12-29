@@ -7,8 +7,6 @@ from app.core.checkpoints import CheckpointManager
 from app.schemas.tables import raw_coinpaprika
 from app.core.http import RateLimitedSession
 
-
-
 source = "coinpaprika_tickers"
 
 cp_http = RateLimitedSession(
@@ -43,7 +41,7 @@ def ingest_coinpaprika(engine):
         ).json()
 
         with engine.begin() as conn:
-            for coin in coins:
+            for coin in coins[:201]:
                 coin_id = coin["id"]
 
                 ticker = cp_http.get(

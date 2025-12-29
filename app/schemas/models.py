@@ -1,10 +1,11 @@
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 
 class AssetMarketData(BaseModel):
-    asset_id: str
+    asset_id: UUID
     source: str
 
     price_usd: Decimal = Field(gt=0)
