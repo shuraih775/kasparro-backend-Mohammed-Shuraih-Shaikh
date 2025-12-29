@@ -341,7 +341,7 @@ The system prioritizes **correctness and long-term stability** over aggressive t
 
 ETL execution is driven by an **ECS Scheduled Task (EventBridge)**.
 
-* Schedule: **Once every four hours**
+* Schedule: **Once every 12 hours**
 * Execution model: one-shot task
 * Each run:
 
